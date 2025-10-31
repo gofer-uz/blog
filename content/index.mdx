@@ -3,29 +3,74 @@ title: Go Blog - Golang o'rganish
 description: Go dasturlash tili haqida blog
 ---
 
+import LinkCard from '../components/LinkCard'
+import ArticlesCard from '../components/ArticlesCard'
+
 ![Gofer UZ Banner](https://raw.githubusercontent.com/gofer-uz/.github/main/PROFILE/BANNER.png)
 
-Assalomu alaykum! Bu yerda Go dasturlash tilini o'rganish uchun foydali maqolalar va amaliy misollarni topasiz.
+<div style={{textAlign: 'center', margin: '2rem 0'}}>
+  <h1 style={{fontSize: '2.5rem', marginBottom: '1rem', background: 'linear-gradient(135deg, #00ADD8 0%, #5DC9E2 100%)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent', backgroundClip: 'text'}}>
+    Go Blog
+  </h1>
+  <div style={{fontSize: '1.2rem', opacity: 0.9, maxWidth: '600px', margin: '0 auto'}}>
+    Assalomu alaykum! Bu yerda Go dasturlash tilini o'rganish uchun foydali maqolalar va amaliy misollarni topasiz.
+  </div>
+</div>
 
-Asosiy web-saytimizga tashrif buyuring: [gopher.uz](https://gopher.uz)
+<div style={{display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: '1.5rem', margin: '3rem 0'}}>
+  <LinkCard 
+    href="https://gopher.uz"
+    icon="🌐"
+    title="Web Sayt"
+    subtitle="gopher.uz"
+    color="#00ADD8"
+  />
+  
+  <LinkCard 
+    href="https://t.me/goferuz"
+    icon="💬"
+    title="Telegram"
+    subtitle="@goferuz"
+    color="#0088cc"
+  />
+  
+  <LinkCard 
+    href="https://github.com/gofer-uz"
+    icon="💻"
+    title="GitHub"
+    subtitle="gofer-uz"
+    color="#0088cc"
+  />
+</div>
 
-## [Maqolalar](/posts)
+##  Maqolalar
 
-Barcha maqolalar bilan tanishish uchun: [Postlar](/posts)
+<ArticlesCard />
+
+---
 
 ## Homiylik
 
-Ushbu loyiha [FLOSS.uz](https://floss.uz) tomonidan qo'llab-quvvatlanadi.
-
-- **GitHub**: [github.com/floss-uz](https://github.com/floss-uz)
+<div style={{
+  padding: '1.5rem',
+  background: 'rgba(0, 0, 0, 0.02)',
+  borderLeft: '4px solid #00ADD8'
+}}>
+  <div>
+    Ushbu loyiha <a href="https://floss.uz" target="_blank" style={{color: '#00ADD8', fontWeight: '600'}}>FLOSS.uz</a> tomonidan qo'llab-quvvatlanadi.
+  </div>
+  
+  <div style={{marginTop: '0.5rem'}}>
+    <a href="https://github.com/floss-uz" target="_blank" >
+       GitHub: floss-uz
+    </a>
+  </div>
+</div>
 
 ---
 
-## Aloqa 
-Agar savollaringiz bo'lsa yoki fikr-mulohazalaringizni bildirmoqchi bo'lsangiz, bizga [Telegram](https://t.me/goferuz) orqali murojaat qilishingiz mumkin.
-
----
-
-<div style={{textAlign: 'center', marginTop: '3rem'}}>
-  <p>❤️ bilan O'zbekiston Go Jamoasi tomonidan yaratilgan</p>
+<div style={{textAlign: 'center', margin: '3rem 0 2rem 0', padding: '2rem', background: 'linear-gradient(135deg, rgba(0, 173, 216, 0.05) 0%, rgba(93, 201, 226, 0.05) 100%)', borderRadius: '12px'}}>
+  <div style={{fontSize: '1.1rem', margin: 0}}>
+    <span style={{fontSize: '1.5rem'}}>❤️</span> bilan <strong style={{color: '#00ADD8'}}>[O'zbekiston Go Jamoasi](https://t.me/goferuz)</strong> tomonidan yaratilgan
+  </div>
 </div>
