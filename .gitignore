@@ -1,0 +1,13 @@
+# TODO: change this later
+
+# node_modules
+node_modules/
+
+# Next.js build output
+.next/
+out/
+
+# Nextra cache
+.nextra/
+
+package-lock.json
