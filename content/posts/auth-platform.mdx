@@ -1,0 +1,311 @@
+---
+title: Golangda autentifikatsiya platformasi va foydalanuvchi ma'lumotlarini saqlash
+date: 2026-07-22
+tags: [auth, autentifikatsiya, go dasturlash tili, postgresql, jwt]
+description: Golangda bcrypt, PostgreSQL, session va JWT bilan xavfsiz autentifikatsiya backendini qurish bo'yicha qo'llanma
+---
+
+# Golangda autentifikatsiya platformasi va foydalanuvchi ma'lumotlarini saqlash
+
+![Gofer UZ](https://raw.githubusercontent.com/gofer-uz/.github/main/PROFILE/BANNER.png)
+
+> To'liq kod: [github.com/gofer-uz/auth-platform](https://github.com/gofer-uz/auth-platform)
+
+# Loyiha maqsadi
+
+Deyarli har bir jiddiy ilova bir savoldan boshlanadi: *bu foydalanuvchi kim, va u aslida o'zi da'vo qilgan odammi?* Autentifikatsiya - shu savolga javob. Ko'pchilik uni tayyor framework yoki uchinchi tomon xizmatiga topshiradi, lekin ichida nima sodir bo'layotganini bilmasangiz, xavfsizlik teshigini o'zingiz sezmay ochib qo'yasiz.
+
+Shu sabab hamjamiyat sifatida biz kichik, lekin haqiqiy auth backend yozdik: framework yo'q, sehr yo'q, faqat standart kutubxona, `pgx` drayveri va toza qatlamlar. Bu maqolada uni asosiy qismlar bo'yicha ochib chiqamiz - **nima uchun** shunday qurilgani bilan birga. To'liq kodni yuqoridagi repozitoriydan olishingiz mumkin.
+
+## Ma'lumotlar bazasi: users va sessions
+
+Hammasi ikki jadvaldan boshlanadi. Foydalanuvchilar va ularning faol seanslari (sessions):
+
+```sql filename="migrations/0001_init.sql"
+CREATE EXTENSION IF NOT EXISTS citext;
+
+CREATE TABLE IF NOT EXISTS users (
+    id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    email         citext UNIQUE NOT NULL,
+    password_hash text NOT NULL,
+    created_at    timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id    uuid NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    token      text UNIQUE NOT NULL,
+    expires_at timestamptz NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+```
+
+Bir necha ataylab qilingan tanlov bor. `citext` tur email'ni katta-kichik harfga befarq qiladi, shuning uchun har bir so'rovga `lower()` yozib yurish shart emas. Eng muhimi - biz `password` emas, `password_hash` saqlaymiz. Parolni ochiq matnda saqlash - eng katta gunoh: bazangiz sizib chiqsa, barcha foydalanuvchilar parolini dushmanga sovg'a qilgan bo'lasiz.
+
+`sessions` jadvalidagi `ON DELETE CASCADE` esa foydalanuvchi o'chirilsa uning barcha seanslari avtomatik o'chishini ta'minlaydi.
+
+## Parolni hash qilish - bcrypt
+
+Parol hech qachon ochiq holda diskka tegmaydi. Uni `bcrypt` bilan hash qilamiz - bu maxsus, ataylab sekin ishlaydigan algoritm, shuning uchun hujumchi millionlab parolni tez sinab ko'ra olmaydi.
+
+```go filename="internal/auth/password.go"
+// bcryptCost - hash uchun ish faktori. 12 - xavfsizlik va tezlik orasidagi
+// yaxshi muvozanat; mashinalar tezlashgani sari uni oshirib boring.
+const bcryptCost = 12
+
+func HashPassword(plaintext string) (string, error) {
+    hash, err := bcrypt.GenerateFromPassword([]byte(plaintext), bcryptCost)
+    if err != nil {
+        return "", err
+    }
+    return string(hash), nil
+}
+
+func VerifyPassword(hash, plaintext string) error {
+    return bcrypt.CompareHashAndPassword([]byte(hash), []byte(plaintext))
+}
+```
+
+`bcrypt` hosil qilgan hash o'z ichiga `salt` va `cost` (12) ni singdiradi, shuning uchun uni bazaga qanday bo'lsa shundayligicha saqlash xavfsiz. `cost` qancha baland bo'lsa, har bir tekshiruv shuncha ko'p vaqt oladi - bu real foydalanuvchi uchun sezilmaydi, hujumchi uchun esa devor bo'ladi.
+
+## UserRepository - almashtirsa bo'ladigan chok (seam)
+
+Endi eng muhim dizayn qaroriga keldik. Xizmat qatlami hech qachon Postgres'ni to'g'ridan-to'g'ri bilmaydi - u faqat **interface** bilan gaplashadi:
+
+```go filename="internal/user/repository.go"
+// UserRepository - akkauntlar uchun saqlash chegarasi.
+// Xizmat va HTTP qatlamlari faqat shu interface'ga bog'liq, hech qachon
+// aniq bazaga emas. Postgres implementatsiyasi postgres.go da yashaydi.
+type UserRepository interface {
+    Create(ctx context.Context, u *User) error
+    ByEmail(ctx context.Context, email string) (*User, error)
+    ByID(ctx context.Context, id string) (*User, error)
+}
+```
+
+Postgres implementatsiyasi alohida faylda turadi va shu uchta metodni to'ldiradi:
+
+```go filename="internal/user/postgres.go"
+func NewPostgresRepository(pool *pgxpool.Pool) UserRepository {
+    return &postgresRepository{pool: pool}
+}
+
+func (r *postgresRepository) Create(ctx context.Context, u *User) error {
+    const q = `
+        INSERT INTO users (email, password_hash)
+        VALUES ($1, $2)
+        RETURNING id::text, created_at`
+
+    err := r.pool.QueryRow(ctx, q, u.Email, u.PasswordHash).Scan(&u.ID, &u.CreatedAt)
+    if err != nil {
+        var pgErr *pgconn.PgError
+        if errors.As(err, &pgErr) && pgErr.Code == uniqueViolation {
+            return ErrDuplicateEmail
+        }
+        return fmt.Errorf("user: create: %w", err)
+    }
+    return nil
+}
+```
+
+E'tibor bering: Postgres'ning `23505` (unique violation) xatosini biz o'zimizning `ErrDuplicateEmail` sentineli'ga aylantiramiz. Shunda yuqoridagi qatlamlar `pgx` haqida hech nima bilmasdan xatoga ishlay oladi.
+
+Nima uchun bu muhim? Chunki ertaga PostgreSQL o'rniga MongoDB ishlatmoqchi bo'lsangiz, faqat **bitta yangi fayl** - `internal/user/mongo.go` - yozib, o'sha uchta metodni implement qilasiz. Xizmat ham, handler'lar ham o'zgarmaydi. Testlar ham xuddi shu interface'ga **xotiradagi soxta (fake)** implementatsiyani ulaydi - shuning uchun butun oqim ma'lumotlar bazasisiz test qilinadi.
+
+## JWT access token - HS256 va alg-pinning
+
+Session cookie brauzerlar uchun qulay, lekin API mijozlariga (mobil ilova, boshqa servis) qisqa muddatli **JWT** token beramiz. Uni HS256 bilan imzolaymiz:
+
+```go filename="internal/auth/token.go"
+func (t *TokenIssuer) Issue(userID, email string) (string, error) {
+    now := time.Now()
+    claims := Claims{
+        Email: email,
+        RegisteredClaims: jwt.RegisteredClaims{
+            Subject:   userID,
+            Issuer:    tokenIssuerName,
+            IssuedAt:  jwt.NewNumericDate(now),
+            ExpiresAt: jwt.NewNumericDate(now.Add(t.ttl)),
+        },
+    }
+    token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+    return token.SignedString(t.secret)
+}
+```
+
+Token'ni tekshirishda esa klassik zaiflikka qarshi himoya bor. JWT dunyosidagi mashhur hujum - hujumchi token sarlavhasidagi `alg` ni `none` ga yoki boshqa algoritmga o'zgartirib, imzoni chetlab o'tishga urinishi. Biz algoritmni HS256 ga **qattiq bog'lab** (pin) qo'yamiz:
+
+```go filename="internal/auth/token.go"
+func (t *TokenIssuer) Parse(raw string) (*Claims, error) {
+    keyFunc := func(token *jwt.Token) (any, error) {
+        // Biz imzolagan algoritmdan boshqasini rad etamiz - bu "alg: none" /
+        // algoritm-chalkashligi hujumiga qarshi himoya.
+        if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+            return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+        }
+        return t.secret, nil
+    }
+
+    var claims Claims
+    token, err := jwt.ParseWithClaims(raw, &claims, keyFunc,
+        jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
+        jwt.WithIssuer(tokenIssuerName),
+    )
+    if err != nil || !token.Valid {
+        return nil, ErrInvalidToken
+    }
+    return &claims, nil
+}
+```
+
+Har qanday tekshiruv xatosi (yomon imzo, noto'g'ri algoritm, muddati o'tgani) bitta `ErrInvalidToken` ga yig'iladi - hujumchiga sababni aytmaymiz.
+
+## Login oqimi - va email enumeratsiyasini to'sish
+
+Endi hammasini bir joyga yig'adigan `auth.Service` ga qaraymiz. Login mantig'i oddiy ko'rinadi, lekin ichida nozik xavfsizlik qarori yashiringan:
+
+```go filename="internal/auth/service.go"
+func (s *Service) Login(ctx context.Context, email, password string) (*LoginResult, error) {
+    email = normalizeEmail(email)
+
+    u, err := s.users.ByEmail(ctx, email)
+    if err != nil {
+        if errors.Is(err, user.ErrNotFound) {
+            // Email topilmasa ham vaqt bo'yicha uni oshkor qilmaslik uchun
+            // bo'sh (throwaway) taqqoslash o'tkazamiz. Xarajat baribir bir xil.
+            _ = VerifyPassword(dummyHash, password)
+            return nil, ErrInvalidCredentials
+        }
+        return nil, err
+    }
+
+    if err := VerifyPassword(u.PasswordHash, password); err != nil {
+        return nil, ErrInvalidCredentials
+    }
+
+    session, err := s.newSession(ctx, u.ID)
+    if err != nil {
+        return nil, err
+    }
+    accessToken, err := s.tokens.Issue(u.ID, u.Email)
+    if err != nil {
+        return nil, err
+    }
+    return &LoginResult{AccessToken: accessToken, Session: session}, nil
+}
+```
+
+Diqqat qiling: email topilmagan bo'lsa ham biz `dummyHash` ga qarshi bekorga bir marta `bcrypt` taqqoslash yugurtiramiz. Nega? Agar mavjud bo'lmagan email uchun javob darhol qaytsa-yu, mavjud email uchun bcrypt sekinligi tufayli kechroq qaytsa, hujumchi javob vaqtini o'lchab qaysi email ro'yxatdan o'tganini aniqlashi mumkin edi (email enumeratsiyasi). Ikkala holatda ham bir xil vaqt sarflab, bu kanalni yopamiz. Xato xabari ham ikkala holda bir xil: `invalid email or password`.
+
+Login muvaffaqiyatli bo'lsa, ikkita narsa qaytadi - bazadagi opaque session token (brauzer cookie'siga) va qisqa muddatli JWT (API mijozlariga).
+
+## Cookie'lar - HttpOnly, Secure, SameSite
+
+Session token brauzerga cookie sifatida beriladi. Uni to'g'ri belgilash - XSS va CSRF hujumlaridan himoyaning muhim qismi:
+
+```go filename="internal/auth/session.go"
+func SetSessionCookie(w http.ResponseWriter, token string, expires time.Time, secure bool) {
+    http.SetCookie(w, &http.Cookie{
+        Name:     SessionCookieName,
+        Value:    token,
+        Path:     "/",
+        Expires:  expires,
+        HttpOnly: true,                  // JavaScript o'qiy olmaydi (XSS himoyasi)
+        Secure:   secure,                // faqat HTTPS orqali (production'da)
+        SameSite: http.SameSiteLaxMode,  // begona saytdan yuborilmaydi (CSRF himoyasi)
+    })
+}
+```
+
+`HttpOnly` cookie'ni JavaScript'dan yashiradi, `Secure` uni faqat HTTPS orqali uzatadi (production'da yoqiladi), `SameSite=Lax` esa boshqa saytlardan kelgan so'rovlarga cookie'ni ilashtirmaydi. Session token'ning o'zi esa `crypto/rand` dan olingan 32 baytlik tasodifiy, taxmin qilib bo'lmaydigan qiymat.
+
+Va JWT'dan farqli o'laroq, session'ni **darhol bekor qilsa bo'ladi** - logout paytida bazadan qatorni o'chirasiz, tamom. Stateless JWT buni o'zicha uddalay olmaydi.
+
+## Router va auth middleware - Go 1.22 uslubida
+
+Marshrutlash uchun uchinchi tomon kutubxonasi kerak emas. Go 1.22 dan beri `net/http` ServeMux'i metod va yo'lni bitta pattern'da ifodalaydi:
+
+```go filename="internal/httpapi/router.go"
+func NewRouter(svc *auth.Service, cookieSecure bool) http.Handler {
+    h := NewHandlers(svc, cookieSecure)
+    requireAuth := RequireAuth(svc)
+
+    mux := http.NewServeMux()
+
+    // Ochiq endpoint'lar.
+    mux.HandleFunc("GET /healthz", h.Health)
+    mux.HandleFunc("POST /api/auth/register", h.Register)
+    mux.HandleFunc("POST /api/auth/login", h.Login)
+
+    // Himoyalangan endpoint'lar - har biri alohida o'raladi.
+    mux.Handle("POST /api/auth/logout", requireAuth(http.HandlerFunc(h.Logout)))
+    mux.Handle("GET /api/me", requireAuth(http.HandlerFunc(h.Me)))
+
+    // Global middleware: eng tashqarida recover, keyin logging.
+    return Chain(mux, Recover, Logger)
+}
+```
+
+`RequireAuth` middleware'i so'rovni handler'ga o'tkazishdan oldin tekshiradi. U ikkala turdagi hisob ma'lumotini qabul qiladi - avval `Authorization: Bearer <jwt>` sarlavhasini, keyin session cookie'sini:
+
+```go filename="internal/httpapi/middleware.go"
+func RequireAuth(svc *auth.Service) Middleware {
+    return func(next http.Handler) http.Handler {
+        return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+            u, err := authenticate(r, svc)
+            if err != nil {
+                writeError(w, http.StatusUnauthorized, "unauthorized")
+                return
+            }
+            ctx := context.WithValue(r.Context(), userCtxKey, u)
+            next.ServeHTTP(w, r.WithContext(ctx))
+        })
+    }
+}
+```
+
+Aniqlangan foydalanuvchi request context'iga qo'yiladi, shundan keyingina handler ishga tushadi. `GET /api/me` handler'i esa uni contextdan olib qaytaradi - hech qanday qo'shimcha tekshiruvsiz.
+
+## Sinab ko'ramiz - curl bilan
+
+Serverni ishga tushirgach (`make run`), butun oqimni terminaldan sinab ko'ramiz:
+
+```bash
+BASE=http://localhost:8080
+
+# 1. Ro'yxatdan o'tish
+curl -s -X POST $BASE/api/auth/register \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"ali@example.com","password":"s3cret-pass"}'
+# -> {"id":"...","email":"ali@example.com"}
+
+# 2. Login - cookie'ni saqlaymiz va JWT'ni olamiz
+curl -s -X POST $BASE/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -c cookies.txt \
+  -d '{"email":"ali@example.com","password":"s3cret-pass"}'
+# -> {"access_token":"eyJhbGciOi..."}
+
+# 3. /api/me - JWT bilan
+TOKEN=eyJhbGciOi...   # yuqoridagi access_token'ni joylang
+curl -s $BASE/api/me -H "Authorization: Bearer $TOKEN"
+# -> {"id":"...","email":"ali@example.com"}
+
+# ...yoki session cookie bilan
+curl -s $BASE/api/me -b cookies.txt
+
+# 4. Logout - session'ni bekor qiladi
+curl -s -X POST $BASE/api/auth/logout -b cookies.txt -i
+```
+
+Xolos. Register parolni bcrypt bilan hash qiladi, login session ochib JWT beradi, `me` ikkala hisob ma'lumotini ham qabul qiladi, logout esa bazadagi session qatorini o'chirib token'ni bir zumda o'lik qiladi.
+
+# Xulosa
+
+Xavfsiz autentifikatsiya sehr emas - u bir necha to'g'ri, "zerikarli" qarorlarning yig'indisi: parolni bcrypt bilan hash qilish, session va JWT'ni to'g'ri joyda ishlatish, cookie bayroqlarini to'g'ri qo'yish, timing kanalini yopish va algoritmni pin qilish. Interface orqali qatlamlarni ajratish esa kodni ham test qilinadigan, ham kengaytiriladigan qiladi.
+
+To'liq kodni, testlarni va `docker-compose` sozlamasini repozitoriydan oling. Ma'lumotlar bazasi bilan chuqurroq ishlashni o'rganmoqchi bo'lsangiz - saytdagi PostgreSQL darslariga qarang.
+
+* Repozitoriya: [github.com/gofer-uz/auth-platform](https://github.com/gofer-uz/auth-platform)
+* Ma'lumotlar Bazasi / PostgreSQL darslari: [gopher.uz/malumotlar-bazasi](https://gopher.uz/malumotlar-bazasi)
+* Telegram hamjamiyat: [t.me/goferuz](https://t.me/goferuz)
